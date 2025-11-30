@@ -1,3 +1,22 @@
+## [0.8.0](https://github.com/Fszta/dbt-column-lineage/compare/v0.7.0...v0.8.0) (2025-11-30)
+
+
+### Features
+
+* add model details card component ([cf5aa7b](https://github.com/Fszta/dbt-column-lineage/commit/cf5aa7b49dfa62719fbf1e0742eca2d9a99b923c))
+* add model details endpoint with desc and tags ([4cdac70](https://github.com/Fszta/dbt-column-lineage/commit/4cdac70d30b0cd762f5239d132ce9818f3bb11e8))
+* **lineage:** add expand upstream lineage capability ([ef89f35](https://github.com/Fszta/dbt-column-lineage/commit/ef89f352567379dbf93aa0f2d01a083881dfbaca))
+* make col relationship summary card collapsible ([21a6135](https://github.com/Fszta/dbt-column-lineage/commit/21a613574f7fb299e5e7cd91bf280d28e442c146))
+* **ui:** add glassmorphism effect and polish interactions ([017b253](https://github.com/Fszta/dbt-column-lineage/commit/017b253f105b09d98fda183908161bdad0f1aa1e))
+* **ui:** enhance explorer tree with badges, node count and search highlight ([f73d88b](https://github.com/Fszta/dbt-column-lineage/commit/f73d88b3303c2970ffe9a4a6ac684ba486dd3ce7))
+* **ui:** improve graph viz with better shaddow and hover states ([636df01](https://github.com/Fszta/dbt-column-lineage/commit/636df0135c7e2e003711e7ff7cf084a4e1f7c67b))
+
+
+### Bug Fixes
+
+* **lineage:** align exposure edges horizontally with model edges ([38fed02](https://github.com/Fszta/dbt-column-lineage/commit/38fed021bb899497703978ff7361ab0166685a00))
+* return full upstream lineage chain in api, not only n-1 ([0ece04a](https://github.com/Fszta/dbt-column-lineage/commit/0ece04a88902ee3c9eb41a04ac1f9767cf4eb2e4))
+
 ## [0.7.0](https://github.com/Fszta/dbt-column-lineage/compare/v0.6.0...v0.7.0) (2025-11-28)
 
 
