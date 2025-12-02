@@ -5,15 +5,19 @@
 function initGraph(data) {
     const graphElement = document.getElementById('graph');
 
-    // Preserve the impact analysis card and relationship summary card before clearing
     const impactCard = document.getElementById('impactAnalysisCard');
     const relationshipSummaryCard = document.getElementById('relationshipSummaryCard');
+    const emptyState = document.getElementById('graphEmptyState');
     const preservedCard = impactCard ? impactCard.cloneNode(true) : null;
     const preservedSummaryCard = relationshipSummaryCard ? relationshipSummaryCard.cloneNode(true) : null;
+    const preservedEmptyState = emptyState ? emptyState.cloneNode(true) : null;
 
     graphElement.innerHTML = '';
 
-    // Re-append the preserved cards if they existed
+    if (preservedEmptyState) {
+        preservedEmptyState.style.display = 'none';
+        graphElement.appendChild(preservedEmptyState);
+    }
     if (preservedCard) {
         graphElement.appendChild(preservedCard);
     }
@@ -27,6 +31,9 @@ function initGraph(data) {
 
     if (!data || !data.nodes || !data.edges || data.nodes.length === 0) {
         if (isExploreMode) {
+            if (preservedEmptyState) {
+                preservedEmptyState.style.display = 'flex';
+            }
             return null;
         }
 
