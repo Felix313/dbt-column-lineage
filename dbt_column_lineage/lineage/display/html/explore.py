@@ -72,7 +72,7 @@ class LineageExplorer:
         async def home(request: Request) -> Any:
             return self.templates.TemplateResponse(
                 "graph.html",
-                {"request": request, "data": self.data.model_dump(), "explore_mode": True},
+                {"request": request, "data": GraphData().model_dump(), "explore_mode": True},
             )
 
         @self.app.get("/api/graph")

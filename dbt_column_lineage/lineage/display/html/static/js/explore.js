@@ -518,6 +518,11 @@ const ExploreModule = (function() {
                             return;
                         }
 
+                        const emptyState = document.getElementById('graphEmptyState');
+                        if (emptyState) {
+                            emptyState.style.display = 'none';
+                        }
+
                         const newGraphInstance = initGraph(data);
                         if (graphInstanceRef) {
                             graphInstanceRef.current = newGraphInstance;
