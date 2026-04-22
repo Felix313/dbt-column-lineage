@@ -618,8 +618,14 @@ class SQLColumnParser:
         trans_type = "direct"
         sql_expr = None
         if table in context.cte_sources and col_name in context.cte_sources[table]:
-            trans_type = context.cte_transformation_types.get(table, {}).get(col_name, "direct")
+            cte_trans_type = context.cte_transformation_types.get(table, {}).get(col_name, "direct")
             sql_expr = context.cte_sql_expressions.get(table, {}).get(col_name)
+            # A direct alias at the outermost SELECT promotes a CTE-direct column to 'renamed'.
+            # Derived columns keep their type — an alias on an aggregation is still derived.
+            if is_aliased and cte_trans_type == "direct":
+                trans_type = "renamed"
+            else:
+                trans_type = cte_trans_type
         elif is_aliased:
             trans_type = "renamed"
 

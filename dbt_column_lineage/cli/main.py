@@ -31,9 +31,9 @@ logging.basicConfig(
 )
 @click.option(
     '--catalog',
-    type=click.Path(exists=True),
-    default="target/catalog.json",
-    help="Path to the dbt catalog file"
+    type=click.Path(),
+    default=None,
+    help="Path to the dbt catalog file (mutually exclusive with --live-db)"
 )
 @click.option(
     '--manifest',
@@ -41,29 +41,114 @@ logging.basicConfig(
     default="target/manifest.json",
     help="Path to the dbt manifest file"
 )
-@click.option('--format', '-f', 
-              type=click.Choice(['text', 'dot']), 
+@click.option(
+    '--live-db',
+    is_flag=True,
+    default=False,
+    help="Query the live database for column schemas instead of --catalog (requires --profiles-dir)"
+)
+@click.option(
+    '--profiles-dir',
+    default=".",
+    help="Directory containing profiles.yml (used with --live-db)"
+)
+@click.option(
+    '--project-dir',
+    default=".",
+    help="dbt project root directory (used with --live-db)"
+)
+@click.option(
+    '--target',
+    default=None,
+    help="dbt target profile name (used with --live-db)"
+)
+@click.option('--format', '-f',
+              type=click.Choice(['text', 'dot']),
               default='text',
               help='Output format (text or dot graph)')
 @click.option('--output', '-o', default='lineage',
               help='Output file name for dot format (without extension)')
-@click.option('--port', '-p', 
+@click.option('--port', '-p',
               default=8000,
               help='Port to run the HTML server (only used with --explore)')
 @click.option('--adapter',
               help='Override sqlglot dialect (e.g., tsql, snowflake, bigquery). If set, ignores adapter from manifest.')
-def cli(select: str, explore: bool, catalog: str, manifest: str, format: str, output: str, port: int, adapter: Optional[str]) -> None:
+def cli(
+    select: str,
+    explore: bool,
+    catalog: Optional[str],
+    manifest: str,
+    live_db: bool,
+    profiles_dir: str,
+    project_dir: str,
+    target: Optional[str],
+    format: str,
+    output: str,
+    port: int,
+    adapter: Optional[str],
+) -> None:
     """DBT Column Lineage - Generate column-level lineage for DBT models."""
     if not select and not explore:
         click.echo("Error: Either --select or --explore must be specified", err=True)
         sys.exit(1)
-    
+
     if select and explore:
         click.echo("Error: Cannot use both --select and --explore at the same time", err=True)
         sys.exit(1)
 
+    if live_db and catalog:
+        click.echo("Error: --live-db and --catalog are mutually exclusive", err=True)
+        sys.exit(1)
+
+    if not live_db and not catalog:
+        # Fall back to default catalog path when neither flag is given
+        catalog = "target/catalog.json"
+
     try:
-        service = LineageService(Path(catalog), Path(manifest), adapter=adapter)
+        if live_db:
+            from dbt_column_lineage.artifacts.live_db import LiveDbCatalogReader
+            from dbt_column_lineage.artifacts.registry import ModelRegistry
+
+            catalog_reader = LiveDbCatalogReader(
+                manifest_path=manifest,
+                project_dir=project_dir,
+                profiles_dir=profiles_dir,
+                target=target,
+            )
+            registry_obj = ModelRegistry(
+                catalog_path=None,
+                manifest_path=manifest,
+                adapter_override=adapter,
+                _catalog_reader_override=catalog_reader,
+            )
+            registry_obj.load()
+
+            class _ServiceShim:
+                """Minimal shim so the rest of the CLI works unchanged."""
+                def __init__(self, reg):
+                    self.registry = reg
+
+                def get_model_info(self, selector):
+                    model = self.registry.get_model(selector.model)
+                    return {
+                        "name": model.name,
+                        "schema": model.schema_name,
+                        "database": model.database,
+                        "columns": list(model.columns.keys()),
+                        "upstream": list(model.upstream) if selector.upstream else [],
+                        "downstream": list(model.downstream) if selector.downstream else [],
+                    }
+
+                def _get_upstream_lineage(self, model, column):
+                    from dbt_column_lineage.lineage.service import LineageService
+                    raise NotImplementedError("Recursive upstream not available in shim")
+
+                def _get_downstream_lineage(self, model, column):
+                    raise NotImplementedError("Recursive downstream not available in shim")
+
+            service = _ServiceShim(registry_obj)
+        else:
+            service = LineageService(Path(catalog), Path(manifest), adapter=adapter)
         
         if explore:
             click.echo(f"Starting explore mode server on port {port}...")

@@ -32,11 +32,15 @@ class RegistryState:
 class ModelRegistry:
     def __init__(
         self,
-        catalog_path: str,
+        catalog_path: Optional[str],
         manifest_path: str,
         adapter_override: Optional[str] = None,
+        _catalog_reader_override: Optional[CatalogReader] = None,
     ):
-        self._catalog_reader = CatalogReader(catalog_path)
+        if _catalog_reader_override is not None:
+            self._catalog_reader = _catalog_reader_override
+        else:
+            self._catalog_reader = CatalogReader(catalog_path)  # type: ignore[arg-type]
         self._manifest_reader = ManifestReader(manifest_path)
         self._state = RegistryState(models={}, exposures={}, is_loaded=False)
         self._sql_parser: Optional[SQLColumnParser] = None

@@ -8,6 +8,19 @@ class ColumnLineage(BaseModel):
     sql_expression: Optional[str] = None
     description: Optional[str] = None
 
+    @property
+    def is_rename(self) -> bool:
+        """True when this lineage entry represents a pure column rename (aliased bare ColumnRef)."""
+        return self.transformation_type == "renamed"
+
+    @property
+    def source_column(self) -> Optional[str]:
+        """The original column name before the rename, or None if not a rename."""
+        if not self.is_rename or not self.source_columns:
+            return None
+        src = next(iter(sorted(self.source_columns)))
+        return src.split(".")[-1].lower()
+
 
 class Column(BaseModel):
     name: str
