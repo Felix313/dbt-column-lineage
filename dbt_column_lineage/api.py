@@ -170,11 +170,12 @@ def get_column_lineage(
     )
     registry.load()
 
-    # Build a set of source node names so we can detect when a progenitor
-    # is a raw source (not a dbt model) — those columns are also first-in-chain.
+    # Build a set of terminal node names (sources + seeds) — columns whose progenitor
+    # is one of these are at the origin of the lineage graph (first-in-chain).
     all_nodes = registry.get_models()
-    source_names: set = {
-        name for name, node in all_nodes.items() if node.resource_type == "source"
+    terminal_node_names: set = {
+        name for name, node in all_nodes.items()
+        if node.resource_type in ("source", "seed")
     }
 
     model_filter = {m.lower() for m in models} if models else None
@@ -206,8 +207,8 @@ def get_column_lineage(
             lin = col_obj.lineage[0]
             progenitor_model, progenitor_column = _resolve_progenitor(lin)
             is_computed = lin.transformation_type == "derived"
-            # first-in-chain: no upstream dbt model (progenitor absent or is a raw source)
-            is_first = (progenitor_model is None or progenitor_model in source_names) and not is_computed
+            # first-in-chain: no upstream dbt model (progenitor absent or is a raw source/seed)
+            is_first = (progenitor_model is None or progenitor_model in terminal_node_names) and not is_computed
 
             results.append(
                 ColumnLineageResult(

@@ -452,18 +452,23 @@ def test_is_first_in_chain_false_when_progenitor_is_dbt_model(tmp_path):
     assert by_col["total"].is_first_in_chain is False      # computed with dbt model progenitor
 
 
-def test_is_first_in_chain_true_when_progenitor_is_source(tmp_path):
-    """Columns whose progenitor is a dbt *source* node are first-in-chain."""
+def test_is_first_in_chain_true_when_progenitor_is_source_or_seed(tmp_path):
+    """Columns whose progenitor is a dbt source or seed node are first-in-chain."""
     m = _make_manifest(tmp_path)
     c = _make_catalog(tmp_path)
 
     raw_source = _make_model("raw_table", {"id": []})
     raw_source.resource_type = "source"
 
+    seed_node = _make_model("my_seed", {"code": []})
+    seed_node.resource_type = "seed"
+
     models = {
         "raw_table": raw_source,
+        "my_seed": seed_node,
         "stg_orders": _make_model("stg_orders", {
             "order_id": [ColumnLineage(source_columns={"raw_table.id"}, transformation_type="direct")],
+            "status_code": [ColumnLineage(source_columns={"my_seed.code"}, transformation_type="direct")],
         }),
     }
 
@@ -475,7 +480,6 @@ def test_is_first_in_chain_true_when_progenitor_is_source(tmp_path):
         results = get_column_lineage(str(m), catalog_path=str(c))
 
     stg_cols = {r.column: r for r in results if r.model == "stg_orders"}
-    assert stg_cols["order_id"].is_first_in_chain is True   # progenitor is a source, not a model
-    assert stg_cols["order_id"].progenitor_model == "raw_table"  # progenitor still reported
-
+    assert stg_cols["order_id"].is_first_in_chain is True    # progenitor is a source
+    assert stg_cols["status_code"].is_first_in_chain is True  # progenitor is a seed
 
