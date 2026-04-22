@@ -6,8 +6,12 @@ Do not break the signatures of ``ColumnLineageResult`` or ``get_column_lineage``
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Literal, Optional
+
+from dbt_column_lineage.artifacts.exceptions import CompiledSqlMissingError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,7 @@ def get_column_lineage(
     target: Optional[str] = None,
     models: Optional[List[str]] = None,
     dialect: Optional[str] = None,
+    compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "manifest",
 ) -> List[ColumnLineageResult]:
     """Resolve column-level lineage for dbt models.
 
@@ -55,7 +60,8 @@ def get_column_lineage(
         catalog_path: Path to ``catalog.json`` (mutually exclusive with *live_db*).
         live_db: When True, query the live database for column schemas via the
             dbt adapter (requires *profiles_dir* and a dbt project at *project_dir*).
-        project_dir: dbt project root directory.  Required when *live_db=True*.
+        project_dir: dbt project root directory.  Required when *live_db=True* or
+            *compiled_sql_source="auto_compile"*.
         profiles_dir: Directory containing ``profiles.yml``.  Defaults to the
             current directory when *live_db=True*.
         target: dbt target profile name.  Uses profile default when omitted.
@@ -63,6 +69,25 @@ def get_column_lineage(
             results to.  When None, all models in the manifest are included.
         dialect: SQL dialect override (e.g. ``"snowflake"``).  When None, the
             adapter type from the manifest is used automatically.
+        compiled_sql_source: Controls how compiled SQL is obtained when the
+            manifest does not contain inline ``compiled_code``.
+
+            ``"manifest"`` *(default)* — only use inline compiled SQL embedded
+            by ``dbt compile`` or ``dbt run``.  Raises
+            :exc:`~dbt_column_lineage.artifacts.exceptions.CompiledSqlMissingError`
+            if the manifest was produced by ``dbt parse`` and contains no
+            compiled SQL.
+
+            ``"target_dir"`` — fall back to ``.sql`` files in
+            ``target/compiled/`` when inline compiled SQL is absent.
+
+            .. warning::
+                These files may be **stale** if models have changed since the
+                last ``dbt compile`` run.  Column lineage may be inaccurate.
+
+            ``"auto_compile"`` — run ``dbt compile`` automatically before
+            resolving lineage.  Requires *project_dir*.  The freshly compiled
+            manifest is then used, guaranteeing accuracy.
 
     Returns:
         List of :class:`ColumnLineageResult` — one entry per (model, column) pair
@@ -71,14 +96,38 @@ def get_column_lineage(
 
     Raises:
         ValueError: When both *catalog_path* and *live_db* are supplied, or
-            neither is supplied.
-        RuntimeError: When the dbt adapter cannot be bootstrapped (live_db mode).
+            neither is supplied; or when *compiled_sql_source="auto_compile"*
+            but *project_dir* is not provided.
+        CompiledSqlMissingError: When *compiled_sql_source="manifest"* and the
+            manifest contains no inline compiled SQL.
+        RuntimeError: When the dbt adapter cannot be bootstrapped (live_db mode)
+            or when ``dbt compile`` fails (auto_compile mode).
         FileNotFoundError: When *manifest_path* or *catalog_path* do not exist.
     """
     if catalog_path and live_db:
         raise ValueError("Provide either catalog_path or live_db=True, not both.")
     if not catalog_path and not live_db:
         raise ValueError("Either catalog_path or live_db=True is required.")
+
+    if compiled_sql_source == "auto_compile":
+        if not project_dir:
+            raise ValueError(
+                "project_dir is required when compiled_sql_source='auto_compile'."
+            )
+        _run_dbt_compile(project_dir=project_dir, profiles_dir=profiles_dir, target=target)
+
+    # Pre-flight: check that the manifest has inline compiled SQL (unless caller
+    # opted into a fallback strategy).
+    if compiled_sql_source == "manifest":
+        _assert_compiled_sql_present(manifest_path)
+
+    use_target_dir = compiled_sql_source in ("target_dir", "auto_compile")
+    if use_target_dir and compiled_sql_source == "target_dir":
+        logger.warning(
+            "compiled_sql_source='target_dir': falling back to target/compiled/ files. "
+            "These files may be stale if models have changed since the last 'dbt compile' run. "
+            "Column lineage may be inaccurate."
+        )
 
     catalog_reader = _build_catalog_reader(
         manifest_path=manifest_path,
@@ -96,6 +145,7 @@ def get_column_lineage(
         manifest_path=manifest_path,
         adapter_override=dialect,
         _catalog_reader_override=catalog_reader,
+        use_target_dir_fallback=use_target_dir,
     )
     registry.load()
 
@@ -166,6 +216,53 @@ def _build_catalog_reader(
     from dbt_column_lineage.artifacts.catalog import CatalogReader
 
     return CatalogReader(catalog_path=catalog_path)  # type: ignore[arg-type]
+
+
+def _assert_compiled_sql_present(manifest_path: str) -> None:
+    """Raise CompiledSqlMissingError if the manifest has no inline compiled SQL.
+
+    Inspects the manifest before loading the registry so the error fires early
+    with a clear, actionable message instead of silently producing empty lineage.
+    """
+    from dbt_column_lineage.artifacts.manifest import ManifestReader
+
+    reader = ManifestReader(manifest_path)
+    reader.load()
+    if not reader.has_inline_compiled_sql():
+        raise CompiledSqlMissingError(
+            "The manifest at '{}' was generated by 'dbt parse' and contains no "
+            "compiled SQL. Column lineage cannot be resolved without compiled SQL.\n\n"
+            "Fix options:\n"
+            "  1. Run 'dbt compile' in your project, then retry with the default "
+            "compiled_sql_source='manifest'.\n"
+            "  2. Pass compiled_sql_source='auto_compile' and project_dir=<path> "
+            "to let dbt-column-lineage run 'dbt compile' automatically.\n"
+            "  3. Pass compiled_sql_source='target_dir' to use previously compiled "
+            "files under target/compiled/ (may be stale).".format(manifest_path)
+        )
+
+
+def _run_dbt_compile(
+    project_dir: str,
+    profiles_dir: Optional[str],
+    target: Optional[str],
+) -> None:
+    """Run ``dbt compile`` as a subprocess and raise RuntimeError on failure."""
+    cmd = [sys.executable, "-m", "dbt", "compile", "--project-dir", project_dir]
+    if profiles_dir:
+        cmd += ["--profiles-dir", profiles_dir]
+    if target:
+        cmd += ["--target", target]
+
+    logger.info("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"'dbt compile' failed (exit {result.returncode}).\n"
+            f"stdout: {result.stdout[-2000:]}\n"
+            f"stderr: {result.stderr[-2000:]}"
+        )
+    logger.info("'dbt compile' completed successfully.")
 
 
 def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:

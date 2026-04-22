@@ -36,6 +36,7 @@ class ModelRegistry:
         manifest_path: str,
         adapter_override: Optional[str] = None,
         _catalog_reader_override: Optional[CatalogReader] = None,
+        use_target_dir_fallback: bool = False,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -46,6 +47,7 @@ class ModelRegistry:
         self._sql_parser: Optional[SQLColumnParser] = None
         self._dialect: Optional[str] = None
         self._adapter_override: Optional[str] = adapter_override
+        self._use_target_dir_fallback: bool = use_target_dir_fallback
 
     @property
     def is_loaded(self) -> bool:
@@ -143,6 +145,8 @@ class ModelRegistry:
                 continue
 
             sql = self._manifest_reader.get_compiled_sql(model_name)
+            if not sql and self._use_target_dir_fallback:
+                sql = self._manifest_reader.get_compiled_sql_from_disk(model_name)
             if not sql:
                 skipped_models += 1
                 skipped_model_names.append(model_name)

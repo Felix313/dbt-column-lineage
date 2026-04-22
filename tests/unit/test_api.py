@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dbt_column_lineage.api import ColumnLineageResult, get_column_lineage, _resolve_progenitor
+from dbt_column_lineage.artifacts.exceptions import CompiledSqlMissingError
 from dbt_column_lineage.models.schema import Column, ColumnLineage, Model
 
 
@@ -37,7 +38,16 @@ def _make_model(name: str, cols: dict[str, list[ColumnLineage]]) -> Model:
 def _make_manifest(tmp_path: Path) -> Path:
     manifest = {
         "metadata": {"adapter_type": "snowflake"},
-        "nodes": {},
+        "nodes": {
+            # Minimal node with compiled_code so the pre-flight check passes.
+            # Tests that mock the full registry don't depend on this content.
+            "model.pkg.dummy": {
+                "resource_type": "model",
+                "name": "dummy",
+                "language": "sql",
+                "compiled_code": "select 1 as id",
+            }
+        },
         "sources": {},
     }
     p = tmp_path / "manifest.json"
@@ -214,3 +224,125 @@ def test_resolve_progenitor_empty():
     model, col = _resolve_progenitor(lin)
     assert model is None
     assert col is None
+
+
+# ---------------------------------------------------------------------------
+# compiled_sql_source validation
+# ---------------------------------------------------------------------------
+
+def test_auto_compile_requires_project_dir(tmp_path):
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+    with pytest.raises(ValueError, match="project_dir is required"):
+        get_column_lineage(str(m), catalog_path=str(c), compiled_sql_source="auto_compile")
+
+
+def test_manifest_source_raises_when_no_compiled_code(tmp_path):
+    """Manifest with no compiled_code should raise CompiledSqlMissingError."""
+    manifest = {
+        "metadata": {"adapter_type": "snowflake"},
+        "nodes": {
+            "model.pkg.my_model": {
+                "resource_type": "model",
+                "name": "my_model",
+                "language": "sql",
+                # no compiled_code or compiled_sql
+            }
+        },
+        "sources": {},
+    }
+    m = tmp_path / "manifest.json"
+    import json
+    m.write_text(json.dumps(manifest))
+    c = _make_catalog(tmp_path)
+
+    with pytest.raises(CompiledSqlMissingError, match="dbt parse"):
+        get_column_lineage(str(m), catalog_path=str(c), compiled_sql_source="manifest")
+
+
+def test_target_dir_source_logs_warning_and_proceeds(tmp_path):
+    """compiled_sql_source='target_dir' should not raise even with no inline SQL."""
+    import json
+    manifest = {
+        "metadata": {"adapter_type": "snowflake"},
+        "nodes": {},
+        "sources": {},
+    }
+    m = tmp_path / "manifest.json"
+    m.write_text(json.dumps(manifest))
+    c = _make_catalog(tmp_path)
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = {}
+        instance.load.return_value = None
+
+        # Should not raise — empty manifest just produces empty results
+        results = get_column_lineage(str(m), catalog_path=str(c), compiled_sql_source="target_dir")
+
+    assert results == []
+
+
+def test_auto_compile_calls_dbt_compile_subprocess(tmp_path):
+    """compiled_sql_source='auto_compile' invokes dbt compile before resolving."""
+    import json
+    manifest = {
+        "metadata": {"adapter_type": "snowflake"},
+        "nodes": {},
+        "sources": {},
+    }
+    m = tmp_path / "manifest.json"
+    m.write_text(json.dumps(manifest))
+    c = _make_catalog(tmp_path)
+
+    mock_completed = MagicMock()
+    mock_completed.returncode = 0
+
+    with (
+        patch("subprocess.run", return_value=mock_completed) as mock_run,
+        patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry,
+    ):
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = {}
+        instance.load.return_value = None
+
+        results = get_column_lineage(
+            str(m),
+            catalog_path=str(c),
+            compiled_sql_source="auto_compile",
+            project_dir=str(tmp_path),
+        )
+
+    mock_run.assert_called_once()
+    call_args = mock_run.call_args[0][0]
+    assert "compile" in call_args
+    assert str(tmp_path) in call_args
+    assert results == []
+
+
+def test_auto_compile_raises_on_dbt_failure(tmp_path):
+    """auto_compile raises RuntimeError if dbt compile exits non-zero."""
+    import json
+    manifest = {
+        "metadata": {"adapter_type": "snowflake"},
+        "nodes": {},
+        "sources": {},
+    }
+    m = tmp_path / "manifest.json"
+    m.write_text(json.dumps(manifest))
+    c = _make_catalog(tmp_path)
+
+    mock_failed = MagicMock()
+    mock_failed.returncode = 1
+    mock_failed.stdout = "some output"
+    mock_failed.stderr = "dbt compile error"
+
+    with patch("subprocess.run", return_value=mock_failed):
+        with pytest.raises(RuntimeError, match="dbt compile.*failed"):
+            get_column_lineage(
+                str(m),
+                catalog_path=str(c),
+                compiled_sql_source="auto_compile",
+                project_dir=str(tmp_path),
+            )
+

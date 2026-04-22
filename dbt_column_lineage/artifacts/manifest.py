@@ -95,12 +95,73 @@ class ManifestReader:
         return downstream
 
     def get_compiled_sql(self, model_name: str) -> Optional[str]:
-        """Get compiled SQL for a model from the manifest."""
+        """Return compiled SQL embedded in the manifest node, or None.
+
+        ``dbt compile`` and ``dbt run`` embed compiled SQL directly in every
+        manifest node (``compiled_code`` for dbt ≥ 1.3, ``compiled_sql`` for
+        older versions).  ``dbt parse`` does **not** — this method returns
+        ``None`` in that case.  Callers that need a fallback should call
+        :meth:`get_compiled_sql_from_disk` explicitly.
+        """
         node = self._find_node(model_name)
         if not node:
             return None
+        return node.get("compiled_sql") or node.get("compiled_code") or None
 
-        return node.get("compiled_sql") or node.get("compiled_code")
+    def get_compiled_sql_from_disk(self, model_name: str) -> Optional[str]:
+        """Return compiled SQL from ``target/compiled/`` on disk, or None.
+
+        This is an *explicit* fallback for when the manifest has no inline
+        compiled SQL (i.e. the manifest was produced by ``dbt parse``).
+
+        .. warning::
+            The files under ``target/compiled/`` may be **stale** — they
+            reflect the last ``dbt compile`` run, which may pre-date recent
+            model changes.  Use this method only when you have verified that
+            the compiled files are up-to-date, or when approximate lineage is
+            acceptable.
+        """
+        node = self._find_node(model_name)
+        if not node:
+            return None
+        compiled_path = self._compiled_sql_path(node)
+        if compiled_path and compiled_path.exists():
+            try:
+                return compiled_path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+        return None
+
+    def has_inline_compiled_sql(self) -> bool:
+        """Return True if at least one model node has inline compiled SQL.
+
+        A quick pre-flight check: if the manifest was produced by ``dbt parse``
+        none of the nodes will have ``compiled_code``.
+        """
+        for node in self.manifest.get("nodes", {}).values():
+            if node.get("resource_type") == "model":
+                if node.get("compiled_sql") or node.get("compiled_code"):
+                    return True
+        return False
+
+    def _compiled_sql_path(self, node: Dict[str, Any]) -> Optional[Path]:
+        """Construct the on-disk path for a compiled SQL file.
+
+        Pattern: <target_dir>/compiled/<package_name>/<original_file_path>
+        where <target_dir> is the directory that contains manifest.json.
+        """
+        if not self.manifest_path:
+            return None
+
+        original_file_path = node.get("original_file_path")
+        unique_id = node.get("unique_id", "")
+        parts = unique_id.split(".")
+        if not original_file_path or len(parts) < 2:
+            return None
+
+        package_name = parts[1]
+        target_dir = self.manifest_path.parent  # e.g. .../target/
+        return target_dir / "compiled" / package_name / Path(original_file_path)
 
     def get_model_path(self, model_name: str) -> Optional[str]:
         """Get the path to the model from the manifest."""
