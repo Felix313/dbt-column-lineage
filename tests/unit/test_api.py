@@ -425,15 +425,45 @@ def test_is_computed_false_when_no_lineage(tmp_path):
     assert r.is_first_in_chain is True
 
 
-def test_is_first_in_chain_false_when_progenitor_exists(tmp_path):
-    """Columns with a known progenitor model must have is_first_in_chain=False."""
+def test_is_first_in_chain_false_when_progenitor_is_dbt_model(tmp_path):
+    """Columns whose progenitor is a dbt model must have is_first_in_chain=False."""
     m = _make_manifest(tmp_path)
     c = _make_catalog(tmp_path)
 
     models = {
+        "stg": _make_model("stg", {"col": []}),   # source type, no lineage
         "orders": _make_model("orders", {
             "order_id": [ColumnLineage(source_columns={"stg.id"}, transformation_type="direct")],
             "total":    [ColumnLineage(source_columns={"stg.amount"}, transformation_type="derived")],
+        }),
+    }
+    # Make "stg" a dbt model (resource_type="model") so it is NOT in source_names
+    # — the default from _make_model already sets resource_type="model"
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = models
+        instance.load.return_value = None
+
+        results = get_column_lineage(str(m), catalog_path=str(c))
+
+    by_col = {r.column: r for r in results if r.model == "orders"}
+    assert by_col["order_id"].is_first_in_chain is False   # progenitor is a dbt model
+    assert by_col["total"].is_first_in_chain is False      # computed with dbt model progenitor
+
+
+def test_is_first_in_chain_true_when_progenitor_is_source(tmp_path):
+    """Columns whose progenitor is a dbt *source* node are first-in-chain."""
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    raw_source = _make_model("raw_table", {"id": []})
+    raw_source.resource_type = "source"
+
+    models = {
+        "raw_table": raw_source,
+        "stg_orders": _make_model("stg_orders", {
+            "order_id": [ColumnLineage(source_columns={"raw_table.id"}, transformation_type="direct")],
         }),
     }
 
@@ -444,7 +474,8 @@ def test_is_first_in_chain_false_when_progenitor_exists(tmp_path):
 
         results = get_column_lineage(str(m), catalog_path=str(c))
 
-    by_col = {r.column: r for r in results}
-    assert by_col["order_id"].is_first_in_chain is False   # has progenitor
-    assert by_col["total"].is_first_in_chain is False      # computed but has progenitor
+    stg_cols = {r.column: r for r in results if r.model == "stg_orders"}
+    assert stg_cols["order_id"].is_first_in_chain is True   # progenitor is a source, not a model
+    assert stg_cols["order_id"].progenitor_model == "raw_table"  # progenitor still reported
+
 
