@@ -48,6 +48,17 @@ class ColumnLineageResult:
     - both False → direct pass-through (same name, same value)
     """
 
+    is_first_in_chain: bool = False
+    """True when this column has no traceable upstream dbt model and is not computed.
+
+    This marks columns that sit at the origin of the lineage graph — typically staging
+    models that pull directly from raw source tables.  Useful for visualisation to
+    distinguish "we traced it all the way back" from "lineage stops here".
+
+    A column is first-in-chain when ``progenitor_model is None`` and ``is_computed`` is
+    False (pure unknowns from parse failures also land here, so treat as a soft signal).
+    """
+
 
 def get_column_lineage(
     manifest_path: str,
@@ -179,6 +190,7 @@ def get_column_lineage(
                         is_rename=False,
                         source_column=None,
                         is_computed=False,
+                        is_first_in_chain=True,
                     )
                 )
                 continue
@@ -186,6 +198,7 @@ def get_column_lineage(
             # Take the first lineage entry (highest precedence after parsing)
             lin = col_obj.lineage[0]
             progenitor_model, progenitor_column = _resolve_progenitor(lin)
+            is_computed = lin.transformation_type == "derived"
 
             results.append(
                 ColumnLineageResult(
@@ -195,7 +208,8 @@ def get_column_lineage(
                     progenitor_column=progenitor_column,
                     is_rename=lin.is_rename,
                     source_column=lin.source_column,
-                    is_computed=lin.transformation_type == "derived",
+                    is_computed=is_computed,
+                    is_first_in_chain=progenitor_model is None and not is_computed,
                 )
             )
 

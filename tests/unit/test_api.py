@@ -403,7 +403,8 @@ def test_is_computed_false_for_direct_and_renamed_columns(tmp_path):
 
 
 def test_is_computed_false_when_no_lineage(tmp_path):
-    """Columns with no lineage (parser couldn't trace them) must have is_computed=False."""
+    """Columns with no lineage (parser couldn't trace them) must have is_computed=False
+    and is_first_in_chain=True (treated as source origin)."""
     m = _make_manifest(tmp_path)
     c = _make_catalog(tmp_path)
 
@@ -419,5 +420,31 @@ def test_is_computed_false_when_no_lineage(tmp_path):
         results = get_column_lineage(str(m), catalog_path=str(c))
 
     assert len(results) == 1
-    assert results[0].is_computed is False
+    r = results[0]
+    assert r.is_computed is False
+    assert r.is_first_in_chain is True
+
+
+def test_is_first_in_chain_false_when_progenitor_exists(tmp_path):
+    """Columns with a known progenitor model must have is_first_in_chain=False."""
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    models = {
+        "orders": _make_model("orders", {
+            "order_id": [ColumnLineage(source_columns={"stg.id"}, transformation_type="direct")],
+            "total":    [ColumnLineage(source_columns={"stg.amount"}, transformation_type="derived")],
+        }),
+    }
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = models
+        instance.load.return_value = None
+
+        results = get_column_lineage(str(m), catalog_path=str(c))
+
+    by_col = {r.column: r for r in results}
+    assert by_col["order_id"].is_first_in_chain is False   # has progenitor
+    assert by_col["total"].is_first_in_chain is False      # computed but has progenitor
 
