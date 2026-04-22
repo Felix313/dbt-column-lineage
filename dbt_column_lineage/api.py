@@ -38,6 +38,16 @@ class ColumnLineageResult:
     source_column: Optional[str]
     """Original column name before the rename, or None when *is_rename* is False."""
 
+    is_computed: bool = False
+    """True when the column value is derived from an expression (arithmetic, function call,
+    CASE statement, etc.) rather than being a direct or renamed column reference.
+
+    Useful for lineage visualisation to distinguish:
+    - ``is_rename=True``  → pass-through with alias (rename)
+    - ``is_computed=True``  → derived/computed value (no traceable single source)
+    - both False → direct pass-through (same name, same value)
+    """
+
 
 def get_column_lineage(
     manifest_path: str,
@@ -168,6 +178,7 @@ def get_column_lineage(
                         progenitor_column=None,
                         is_rename=False,
                         source_column=None,
+                        is_computed=False,
                     )
                 )
                 continue
@@ -184,6 +195,7 @@ def get_column_lineage(
                     progenitor_column=progenitor_column,
                     is_rename=lin.is_rename,
                     source_column=lin.source_column,
+                    is_computed=lin.transformation_type == "derived",
                 )
             )
 

@@ -346,3 +346,78 @@ def test_auto_compile_raises_on_dbt_failure(tmp_path):
                 project_dir=str(tmp_path),
             )
 
+
+# ---------------------------------------------------------------------------
+# is_computed flag
+# ---------------------------------------------------------------------------
+
+def test_is_computed_true_for_derived_columns(tmp_path):
+    """Columns with transformation_type='derived' should have is_computed=True."""
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    derived_lin = ColumnLineage(
+        source_columns={"stg_orders.amount", "stg_orders.tax"},
+        transformation_type="derived",
+    )
+    models = {
+        "orders": _make_model("orders", {"total_amount": [derived_lin]}),
+    }
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = models
+        instance.load.return_value = None
+
+        results = get_column_lineage(str(m), catalog_path=str(c))
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.column == "total_amount"
+    assert r.is_computed is True
+    assert r.is_rename is False
+
+
+def test_is_computed_false_for_direct_and_renamed_columns(tmp_path):
+    """Direct and renamed columns must have is_computed=False."""
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    models = {
+        "orders": _make_model("orders", {
+            "order_id": [ColumnLineage(source_columns={"stg.id"}, transformation_type="direct")],
+            "customer_key": [ColumnLineage(source_columns={"stg.user_id"}, transformation_type="renamed")],
+        }),
+    }
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = models
+        instance.load.return_value = None
+
+        results = get_column_lineage(str(m), catalog_path=str(c))
+
+    by_col = {r.column: r for r in results}
+    assert by_col["order_id"].is_computed is False
+    assert by_col["customer_key"].is_computed is False
+
+
+def test_is_computed_false_when_no_lineage(tmp_path):
+    """Columns with no lineage (parser couldn't trace them) must have is_computed=False."""
+    m = _make_manifest(tmp_path)
+    c = _make_catalog(tmp_path)
+
+    models = {
+        "orders": _make_model("orders", {"mystery_col": []}),
+    }
+
+    with patch("dbt_column_lineage.artifacts.registry.ModelRegistry") as MockRegistry:
+        instance = MockRegistry.return_value
+        instance.get_models.return_value = models
+        instance.load.return_value = None
+
+        results = get_column_lineage(str(m), catalog_path=str(c))
+
+    assert len(results) == 1
+    assert results[0].is_computed is False
+
