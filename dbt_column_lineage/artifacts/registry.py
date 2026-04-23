@@ -37,6 +37,7 @@ class ModelRegistry:
         adapter_override: Optional[str] = None,
         _catalog_reader_override: Optional[CatalogReader] = None,
         use_target_dir_fallback: bool = False,
+        stop_at_ephemeral: bool = False,
     ):
         if _catalog_reader_override is not None:
             self._catalog_reader = _catalog_reader_override
@@ -48,10 +49,19 @@ class ModelRegistry:
         self._dialect: Optional[str] = None
         self._adapter_override: Optional[str] = adapter_override
         self._use_target_dir_fallback: bool = use_target_dir_fallback
+        self._stop_at_ephemeral: bool = stop_at_ephemeral
+        self._ephemeral_lineage: Dict[str, Dict] = {}
 
     @property
     def is_loaded(self) -> bool:
         return self._state.is_loaded
+
+    def get_ephemeral_lineage(self) -> Dict[str, Dict]:
+        """Return collected ephemeral CTE lineage (only populated when stop_at_ephemeral=True).
+
+        Returns a dict keyed by lowercased __dbt__cte__ name, with column → ColumnLineage values.
+        """
+        return self._ephemeral_lineage
 
     def _initialize_models(self) -> Dict[str, Model]:
         """Initialize base model information from catalog."""
@@ -153,8 +163,13 @@ class ModelRegistry:
                 continue
 
             try:
-                parse_result = self._sql_parser.parse_column_lineage(sql)
+                parse_result = self._sql_parser.parse_column_lineage(
+                    sql, stop_at_ephemeral=self._stop_at_ephemeral
+                )
                 self._apply_column_lineage(model, parse_result)
+                # Collect ephemeral CTE lineage from this model's parse result
+                for cte_name, cte_cols in parse_result.ephemeral_cte_lineage.items():
+                    self._ephemeral_lineage.setdefault(cte_name, {}).update(cte_cols)
                 successful_parses += 1
             except Exception as e:
                 failed_parses += 1

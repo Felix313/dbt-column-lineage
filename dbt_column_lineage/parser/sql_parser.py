@@ -28,13 +28,17 @@ class ParserContext:
     cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
     cte_base_tables: Dict[str, Set[str]] = field(default_factory=dict)
     column_definitions: Optional[Dict[str, Any]] = None
+    ephemeral_cte_names: Set[str] = field(default_factory=set)
+    """CTE names that represent injected ephemeral models (__dbt__cte__ prefix).
+    When non-empty, _resolve_column_source stops at these boundaries instead of
+    tracing through them."""
 
 
 class CTEHandler:
     def extract_cte_model_mappings_from_parsed(self, parsed: Any) -> Dict[str, str]:
         mappings = {}
         for cte in parsed.find_all(exp.CTE):
-            cte_name = cte.alias
+            cte_name = cte.alias.lower()
             select = cte.this.find(exp.Select)
             if select:
                 base_table = get_table_context(select)
@@ -152,14 +156,21 @@ class StarExpressionHandler:
     ) -> bool:
         if source_table in context.cte_sources:
             if len(context.cte_sources[source_table]) > 0:
+                stop_at_boundary = source_table in context.ephemeral_cte_names
                 for col_name, col_source in sorted(context.cte_sources[source_table].items()):
                     if col_name.lower() not in excluded_col_names:
-                        trans_type, sql_expr = self.get_cte_transformation_info(
-                            context, source_table, col_name
-                        )
+                        if stop_at_boundary:
+                            # Emit ephemeral.col as source — don't trace through
+                            effective_source = f"{source_table}.{col_name}"
+                            trans_type, sql_expr = "direct", None
+                        else:
+                            effective_source = col_source
+                            trans_type, sql_expr = self.get_cte_transformation_info(
+                                context, source_table, col_name
+                            )
                         columns[col_name.lower()] = [
                             ColumnLineage(
-                                source_columns={col_source},
+                                source_columns={effective_source},
                                 transformation_type=cast(
                                     Literal["direct", "renamed", "derived"], trans_type
                                 ),
@@ -167,10 +178,14 @@ class StarExpressionHandler:
                             )
                         ]
 
+            # Always propagate base tables (covers SELECT * passthrough columns
+            # inside the ephemeral that never land in cte_sources).
             if source_table in context.cte_base_tables:
                 star_sources.update(context.cte_base_tables[source_table])
-
-            if self._cte_handler:
+            # Only trace CTE-to-CTE chains when not stopping at an ephemeral boundary.
+            # Passthrough columns resolve via star_sources second pass; derived/renamed
+            # columns already stopped at the boundary above.
+            if source_table not in context.ephemeral_cte_names and self._cte_handler:
                 self._cte_handler.trace_base_tables(
                     source_table, context.cte_to_model, context.cte_sources, star_sources
                 )
@@ -241,7 +256,7 @@ class SQLColumnParser:
         self._star_handler._cte_handler = self._cte_handler
         self._expression_analyzer = ExpressionAnalyzer(self)
 
-    def parse_column_lineage(self, sql: str) -> SQLParseResult:
+    def parse_column_lineage(self, sql: str, stop_at_ephemeral: bool = False) -> SQLParseResult:
         # Snowflake's GROUP BY ALL confuses sqlglot's parser state after
         # correlated subqueries (EXISTS/IN). Strip it — GROUP BY has no effect
         # on which columns appear in the output or their transformation types.
@@ -253,9 +268,17 @@ class SQLColumnParser:
         cte_sql_expressions: Dict[str, Dict[str, Optional[str]]] = {}
         cte_base_tables: Dict[str, Set[str]] = {}
 
+        # Detect injected ephemeral CTEs (dbt convention: __dbt__cte__<model_name>)
+        ephemeral_cte_names: Set[str] = set()
+        if stop_at_ephemeral:
+            ephemeral_cte_names = {
+                cte.alias.lower() for cte in parsed.find_all(exp.CTE)
+                if cte.alias.lower().startswith("__dbt__cte__")
+            }
+
         aliases = get_table_aliases(parsed)
         for cte in parsed.find_all(exp.CTE):
-            cte_base_tables[cte.alias] = set()
+            cte_base_tables[cte.alias.lower()] = set()
 
         cte_sources = self._build_cte_sources(
             parsed,
@@ -264,6 +287,25 @@ class SQLColumnParser:
             cte_sql_expressions,
             cte_base_tables,
         )
+
+        # Collect ephemeral CTE lineage — the fully-traced column sources for
+        # each ephemeral CTE, used to emit ephemeral model rows in the API.
+        ephemeral_cte_lineage: Dict[str, Dict[str, ColumnLineage]] = {}
+        if stop_at_ephemeral and ephemeral_cte_names:
+            for cte_name in ephemeral_cte_names:
+                if cte_name in cte_sources:
+                    cols: Dict[str, ColumnLineage] = {}
+                    for col, src in cte_sources[cte_name].items():
+                        trans_type = cte_transformation_types.get(cte_name, {}).get(col, "direct")
+                        sql_expr = cte_sql_expressions.get(cte_name, {}).get(col)
+                        cols[col] = ColumnLineage(
+                            source_columns={src} if src else set(),
+                            transformation_type=cast(
+                                Literal["direct", "renamed", "derived"], trans_type
+                            ),
+                            sql_expression=sql_expr,
+                        )
+                    ephemeral_cte_lineage[cte_name] = cols
 
         columns: Dict[str, List[ColumnLineage]] = {}
         star_sources: Set[str] = set()
@@ -307,6 +349,7 @@ class SQLColumnParser:
                 cte_sql_expressions=cte_sql_expressions,
                 cte_base_tables=cte_base_tables,
                 column_definitions=column_definitions,
+                ephemeral_cte_names=ephemeral_cte_names,
             )
 
             for expr in select.expressions:
@@ -361,7 +404,11 @@ class SQLColumnParser:
                 lineage = self._expression_analyzer.analyze(expr, context)
                 columns[target_col] = lineage
 
-        return SQLParseResult(column_lineage=columns, star_sources=star_sources)
+        return SQLParseResult(
+            column_lineage=columns,
+            star_sources=star_sources,
+            ephemeral_cte_lineage=ephemeral_cte_lineage,
+        )
 
     def _extract_cte_model_mappings(self, sql: str) -> Dict[str, str]:
         """Extract mappings from CTE names to model names (legacy method using regex)."""
@@ -399,7 +446,7 @@ class SQLColumnParser:
         cte_sources: Dict[str, Dict[str, str]] = {}
 
         for cte in parsed.find_all(exp.CTE):
-            cte_name = cte.alias
+            cte_name = cte.alias.lower()
             cte_sources[cte_name] = {}
             cte_transformation_types[cte_name] = {}
             cte_sql_expressions[cte_name] = {}
@@ -552,6 +599,7 @@ class SQLColumnParser:
         table: str,
         cte_sources: Dict[str, Dict[str, str]],
         cte_to_model: Optional[Dict[str, str]] = None,
+        ephemeral_cte_names: Optional[Set[str]] = None,
     ) -> str:
         column = strip_sql_comments(column)
         table_part, col_name = split_qualified_name(column)
@@ -559,6 +607,10 @@ class SQLColumnParser:
             table = table_part
 
         col_name_lower = col_name.lower() if col_name else col_name
+
+        # Stop at ephemeral CTE boundary — don't trace through injected CTEs
+        if ephemeral_cte_names and table in ephemeral_cte_names:
+            return f"{table}.{col_name_lower}"
 
         if table in cte_sources:
             if col_name in cte_sources[table]:
@@ -616,7 +668,8 @@ class SQLColumnParser:
         table_part, col = split_qualified_name(source_col)
         table = table_part if table_part else context.table_context
         resolved_source = self._resolve_column_source(
-            source_col, table, context.cte_sources, context.cte_to_model
+            source_col, table, context.cte_sources, context.cte_to_model,
+            context.ephemeral_cte_names,
         )
 
         trans_type = "direct"
@@ -721,7 +774,8 @@ class SQLColumnParser:
             table_part, _ = split_qualified_name(source_col)
             table = table_part if table_part else context.table_context
             resolved = self._resolve_column_source(
-                source_col, table, context.cte_sources, context.cte_to_model
+                source_col, table, context.cte_sources, context.cte_to_model,
+                context.ephemeral_cte_names,
             )
             columns.add(resolved)
         return columns

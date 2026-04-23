@@ -76,3 +76,7 @@ class Model(BaseModel):
 class SQLParseResult(BaseModel):
     column_lineage: Dict[str, List[ColumnLineage]]
     star_sources: Set[str] = Field(default_factory=set)
+    ephemeral_cte_lineage: Dict[str, Dict[str, ColumnLineage]] = Field(default_factory=dict)
+    """Populated only when stop_at_ephemeral=True.
+    Maps lowercased __dbt__cte__ name → {col_name: ColumnLineage} for each
+    ephemeral CTE found in the compiled SQL."""

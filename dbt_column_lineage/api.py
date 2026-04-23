@@ -70,6 +70,7 @@ def get_column_lineage(
     models: Optional[List[str]] = None,
     dialect: Optional[str] = None,
     compiled_sql_source: Literal["manifest", "target_dir", "auto_compile"] = "manifest",
+    include_ephemeral: bool = False,
 ) -> List[ColumnLineageResult]:
     """Resolve column-level lineage for dbt models.
 
@@ -167,6 +168,7 @@ def get_column_lineage(
         adapter_override=dialect,
         _catalog_reader_override=catalog_reader,
         use_target_dir_fallback=use_target_dir,
+        stop_at_ephemeral=include_ephemeral,
     )
     registry.load()
 
@@ -222,6 +224,34 @@ def get_column_lineage(
                     is_first_in_chain=is_first,
                 )
             )
+
+    # Emit ephemeral model rows when include_ephemeral=True.
+    # Each __dbt__cte__<model_name> is stripped of its prefix to surface as
+    # a visible intermediate node in the lineage graph.
+    if include_ephemeral:
+        for cte_name, cte_cols in sorted(registry.get_ephemeral_lineage().items()):
+            # Strip dbt's injection prefix: __dbt__cte__model_name → model_name
+            ephemeral_model_name = cte_name.lstrip("_").replace("dbt__cte__", "", 1)
+            if model_filter and ephemeral_model_name not in model_filter:
+                continue
+            for col_name, lin in sorted(cte_cols.items()):
+                progenitor_model, progenitor_column = _resolve_progenitor(lin)
+                is_computed = lin.transformation_type == "derived"
+                is_first = (
+                    progenitor_model is None or progenitor_model in terminal_node_names
+                ) and not is_computed
+                results.append(
+                    ColumnLineageResult(
+                        model=ephemeral_model_name,
+                        column=col_name,
+                        progenitor_model=progenitor_model,
+                        progenitor_column=progenitor_column,
+                        is_rename=lin.is_rename,
+                        source_column=lin.source_column,
+                        is_computed=is_computed,
+                        is_first_in_chain=is_first,
+                    )
+                )
 
     return results
 
@@ -302,7 +332,11 @@ def _run_dbt_compile(
 
 
 def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:
-    """Extract (model, column) from the first source_column entry of a ColumnLineage."""
+    """Extract (model, column) from the first source_column entry of a ColumnLineage.
+
+    Strips the ``__dbt__cte__`` prefix dbt injects for ephemeral models so that
+    progenitor_model refers to the human-readable model name.
+    """
     if not lin.source_columns:
         return None, None
 
@@ -311,4 +345,8 @@ def _resolve_progenitor(lin) -> tuple[Optional[str], Optional[str]]:
         return None, src.lower()
 
     parts = src.rsplit(".", 1)
-    return parts[0].lower(), parts[1].lower()
+    model_part = parts[0].lower()
+    # Strip dbt's ephemeral CTE injection prefix
+    if model_part.startswith("__dbt__cte__"):
+        model_part = model_part[len("__dbt__cte__"):]
+    return model_part, parts[1].lower()
