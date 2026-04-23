@@ -325,12 +325,15 @@ class SQLColumnParser:
                         table = from_clause.find(exp.Table)
                         if table:
                             table_name = str(table.name).lower()
-                            for cte in parsed.find_all(exp.CTE):
-                                if cte.alias.lower() == table_name:
-                                    cte_select = cte.this.find(exp.Select)
-                                    if cte_select:
-                                        selects_to_process = [cte_select]
-                                        break
+                            # Don't unwrap ephemeral CTEs — the boundary check in
+                            # expand_from_cte must see the ephemeral name as source_table.
+                            if table_name not in ephemeral_cte_names:
+                                for cte in parsed.find_all(exp.CTE):
+                                    if cte.alias.lower() == table_name:
+                                        cte_select = cte.this.find(exp.Select)
+                                        if cte_select:
+                                            selects_to_process = [cte_select]
+                                            break
 
         for select in selects_to_process:
             table_context = get_table_context(select)
