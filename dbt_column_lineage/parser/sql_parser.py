@@ -242,6 +242,10 @@ class SQLColumnParser:
         self._expression_analyzer = ExpressionAnalyzer(self)
 
     def parse_column_lineage(self, sql: str) -> SQLParseResult:
+        # Snowflake's GROUP BY ALL confuses sqlglot's parser state after
+        # correlated subqueries (EXISTS/IN). Strip it — GROUP BY has no effect
+        # on which columns appear in the output or their transformation types.
+        sql = re.sub(r"\bGROUP\s+BY\s+ALL\b", "", sql, flags=re.IGNORECASE)
         parsed = parse_one(sql, dialect=self.dialect)
         cte_to_model = self._cte_handler.extract_cte_model_mappings_from_parsed(parsed)
 
