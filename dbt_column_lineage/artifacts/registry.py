@@ -212,10 +212,15 @@ class ModelRegistry:
                 continue
 
             for source_name in model.metadata["star_sources"]:
-                if source_name not in models:
-                    continue
-
-                self._apply_star_columns(model, source_name, models[source_name])
+                if source_name in models:
+                    self._apply_star_columns(model, source_name, models[source_name])
+                elif source_name in self._ephemeral_lineage:
+                    # Ephemeral model: source_name is __dbt__cte__<model> — emit
+                    # child.col ← __dbt__cte__<model>.col so the ephemeral remains
+                    # visible as an intermediate node in include_ephemeral=True mode.
+                    self._apply_ephemeral_star_columns(
+                        model, source_name, self._ephemeral_lineage[source_name]
+                    )
 
     def _apply_star_columns(self, target: Model, source_name: str, source: Model) -> None:
         """Apply star columns from source to target model."""
@@ -232,6 +237,33 @@ class ModelRegistry:
                 transformation_type="direct",
             )
 
+            if not any(
+                existing.source_columns == star_lineage.source_columns
+                for existing in target_col.lineage
+            ):
+                target_col.lineage.append(star_lineage)
+
+    def _apply_ephemeral_star_columns(
+        self,
+        target: Model,
+        ephemeral_cte_name: str,
+        ephemeral_cols: Dict,
+    ) -> None:
+        """Apply passthrough star columns from an ephemeral CTE to a child model.
+
+        Emits child.col ← ephemeral_cte_name.col so the ephemeral remains visible
+        as an intermediate node when include_ephemeral=True.
+        """
+        for col_name in ephemeral_cols:
+            if col_name not in target.columns:
+                continue
+            target_col = target.columns[col_name]
+            if not target_col.lineage:
+                target_col.lineage = []
+            star_lineage = ColumnLineage(
+                source_columns={f"{ephemeral_cte_name}.{col_name}"},
+                transformation_type="direct",
+            )
             if not any(
                 existing.source_columns == star_lineage.source_columns
                 for existing in target_col.lineage

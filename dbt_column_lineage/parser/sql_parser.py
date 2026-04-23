@@ -178,17 +178,19 @@ class StarExpressionHandler:
                             )
                         ]
 
-            # Always propagate base tables (covers SELECT * passthrough columns
-            # inside the ephemeral that never land in cte_sources).
-            if source_table in context.cte_base_tables:
-                star_sources.update(context.cte_base_tables[source_table])
-            # Only trace CTE-to-CTE chains when not stopping at an ephemeral boundary.
-            # Passthrough columns resolve via star_sources second pass; derived/renamed
-            # columns already stopped at the boundary above.
-            if source_table not in context.ephemeral_cte_names and self._cte_handler:
-                self._cte_handler.trace_base_tables(
-                    source_table, context.cte_to_model, context.cte_sources, star_sources
-                )
+            # When stopping at an ephemeral boundary: add the ephemeral itself to
+            # star_sources so the second pass can resolve passthrough columns via
+            # _ephemeral_lineage, keeping the ephemeral visible as an intermediate node.
+            # When tracing through normally: propagate the real base tables.
+            if source_table in context.ephemeral_cte_names:
+                star_sources.add(source_table)
+            else:
+                if source_table in context.cte_base_tables:
+                    star_sources.update(context.cte_base_tables[source_table])
+                if self._cte_handler:
+                    self._cte_handler.trace_base_tables(
+                        source_table, context.cte_to_model, context.cte_sources, star_sources
+                    )
             return True
         return False
 
